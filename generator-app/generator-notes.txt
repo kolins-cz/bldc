@@ -1,0 +1,25 @@
+
+Sat, 2018-09-22 01:03
+#1
+arvidb
+Offline
+Last seen: 6 years 8 months ago
+Joined: 2018-01-16 23:09
+Posts: 77
+Generator app
+
+Since the generator usecase seems pretty common I wrote a custom app for that:
+
+generator_app.zip
+
+Uzip it to get generator_app.patch (unfortunately ordinary text files are not allowed here, so I had to zip it) and apply to a current firmware (current = 3.40, but older should work too) with
+
+patch -Np1 < path/to/generator_app.patch
+
+This should create the file applications/app_generator.c and modify conf_general.h to use it as the custom app.
+
+Edit app_generator.c and modify GEN_ERPM and GEN_CURRENT (and possibly GEN_START and GEN_UPDATE_RATE_HZ) to your liking. Build the firmware, flash the VESC, and set app configuration to Custom. Now the motor should coast until it reaches GEN_START*GEN_ERPM where it should start to brake, reaching GEN_CURRENT at GEN_ERPM.
+
+Note that if you set GEN_ERPM too low and/or GEN_CURRENT too high, and run the motor without an inertial load, you might get rather violent oscillations (as I couldn't help but notice while testing the code blush). Also, it's probably a bad idea (as in "weird things might happen") to use VESC_Tool to run the motor to a speed where it would start to generate. ;)
+
+If you use it, please give some feedback about how it works, if you had to do any changes, etc.
