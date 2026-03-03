@@ -20,25 +20,28 @@
 */
 
 #include <math.h>
+#include <stdio.h>
 #include "mc_interface.h"
 #include "timeout.h"
+#include "terminal.h"
+#include "commands.h"
 
-
+// Default configuration values
 // Target generator rpm (applies in both directions, always positive)
-#define GEN_ERPM		2000.0
+static float gen_erpm = 2000.0;
 
 // Generator current (amperes) at target rpm (always positive)
-#define GEN_CURRENT		  20.0
+static float gen_current = 20.0;
 
-// At what ratio of GEN_RPM to start generation.
-// GEN_RPM = 2000 and GEN_START = 0.90 would start regenerative braking at
+// At what ratio of gen_erpm to start generation.
+// gen_erpm = 2000 and gen_start = 0.90 would start regenerative braking at
 // 0.90 * 2000 = 1800 rpm, and will linearly increase current so that
-// GEN_CURRENT is reached at GEN_RPM.
+// gen_current is reached at gen_erpm.
 // (VESC_Tool limits, i.e. max motor currents & max battery current, will be
 // respected.)
-#define GEN_START		   0.90
+static float gen_start = 0.90;
 
-#define GEN_UPDATE_RATE_HZ	1000
+static int gen_update_rate_hz = 1000;
 
 static volatile bool stop_now = true;
 static volatile bool is_running = false;
@@ -47,13 +50,33 @@ static volatile bool is_running = false;
 static THD_FUNCTION(gen_thread, arg);
 static THD_WORKING_AREA(gen_thread_wa, 1024);
 
+// Terminal callbacks
+static void terminal_gen_config(int argc, const char **argv);
+static void terminal_gen_status(int argc, const char **argv);
+
 
 void app_custom_start(void) {
+	// Register terminal commands
+	terminal_register_command_callback(
+		"gen_config",
+		"Configure generator parameters",
+		"[erpm] [current] [start] [rate_hz]",
+		terminal_gen_config);
+	
+	terminal_register_command_callback(
+		"gen_status",
+		"Show generator status",
+		"",
+		terminal_gen_status);
+	
 	stop_now = false;
 	chThdCreateStatic(gen_thread_wa, sizeof(gen_thread_wa), NORMALPRIO, gen_thread, NULL);
 }
 
 void app_custom_stop(void) {
+	terminal_unregister_callback(terminal_gen_config);
+	terminal_unregister_callback(terminal_gen_status);
+	
 	stop_now = true;
 	while (is_running) {
 		chThdSleepMilliseconds(1);
@@ -75,17 +98,17 @@ static THD_FUNCTION(gen_thread, arg) {
 		const float rpm_now = mc_interface_get_rpm();
 
 		// Get speed normalized to set rpm
-		const float rpm_rel = fabsf(rpm_now)/GEN_ERPM;
+		const float rpm_rel = fabsf(rpm_now) / gen_erpm;
 
-		// Start generation at GEN_START * set rpm
-		float current = rpm_rel - GEN_START;
+		// Start generation at gen_start * set rpm
+		float current = rpm_rel - gen_start;
 		if (current < 0.0)
 			current = 0.0;
 
 		// Reach 100 % of set current at set rpm
-		current /= 1.00 - GEN_START;
+		current /= 1.00 - gen_start;
 
-		current *= GEN_CURRENT;
+		current *= gen_current;
 
 		if (rpm_now < 0.0) {
 			mc_interface_set_current(current);
@@ -95,7 +118,7 @@ static THD_FUNCTION(gen_thread, arg) {
 
 
 		// Sleep for a time according to the specified rate
-		systime_t sleep_time = CH_CFG_ST_FREQUENCY / GEN_UPDATE_RATE_HZ;
+		systime_t sleep_time = CH_CFG_ST_FREQUENCY / gen_update_rate_hz;
 
 		// At least one tick should be slept to not block the other threads
 		if (sleep_time == 0) {
@@ -111,4 +134,60 @@ static THD_FUNCTION(gen_thread, arg) {
 		// Reset timeout
 		timeout_reset();
 	}
+}
+
+// Terminal command: Configure generator parameters
+static void terminal_gen_config(int argc, const char **argv) {
+	if (argc == 5) {
+		// Set all parameters
+		sscanf(argv[1], "%f", &gen_erpm);
+		sscanf(argv[2], "%f", &gen_current);
+		sscanf(argv[3], "%f", &gen_start);
+		sscanf(argv[4], "%d", &gen_update_rate_hz);
+		
+		commands_printf("Generator configuration updated:");
+		commands_printf("  Target ERPM:    %.1f", (double)gen_erpm);
+		commands_printf("  Max Current:    %.1f A", (double)gen_current);
+		commands_printf("  Start Ratio:    %.2f (%.1f ERPM)", 
+			(double)gen_start, (double)(gen_start * gen_erpm));
+		commands_printf("  Update Rate:    %d Hz", gen_update_rate_hz);
+	} else if (argc == 1) {
+		// Display current settings
+		commands_printf("Generator Configuration:");
+		commands_printf("  Target ERPM:    %.1f", (double)gen_erpm);
+		commands_printf("  Max Current:    %.1f A", (double)gen_current);
+		commands_printf("  Start Ratio:    %.2f (%.1f ERPM)", 
+			(double)gen_start, (double)(gen_start * gen_erpm));
+		commands_printf("  Update Rate:    %d Hz", gen_update_rate_hz);
+		commands_printf(" ");
+		commands_printf("Usage: gen_config <erpm> <current> <start> <rate_hz>");
+		commands_printf("Example: gen_config 2500 15 0.85 1000");
+	} else {
+		commands_printf("Usage: gen_config [erpm] [current] [start] [rate_hz]");
+		commands_printf("Call without parameters to show current settings");
+	}
+}
+
+// Terminal command: Show generator status
+static void terminal_gen_status(int argc, const char **argv) {
+	(void)argc; (void)argv;
+	
+	const float rpm_now = mc_interface_get_rpm();
+	const float rpm_abs = fabsf(rpm_now);
+	const float start_rpm = gen_start * gen_erpm;
+	const float rpm_rel = rpm_abs / gen_erpm;
+	
+	// Calculate current output
+	float current = rpm_rel - gen_start;
+	if (current < 0.0) current = 0.0;
+	current /= 1.00 - gen_start;
+	current *= gen_current;
+	
+	commands_printf("Generator Status:");
+	commands_printf("  Current RPM:    %.1f %s", (double)rpm_abs, rpm_now < 0 ? "(reverse)" : "(forward)");
+	commands_printf("  Target ERPM:    %.1f", (double)gen_erpm);
+	commands_printf("  Start ERPM:     %.1f", (double)start_rpm);
+	commands_printf("  Active:         %s", rpm_abs >= start_rpm ? "YES" : "NO");
+	commands_printf("  Gen Current:    %.1f A", (double)current);
+	commands_printf("  Running:        %s", is_running ? "YES" : "NO");
 }
